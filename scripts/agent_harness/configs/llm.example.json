@@ -1,0 +1,35 @@
+{
+  "default_profile": "openai_default",
+  "profiles": {
+    "openai_default": {
+      "provider": "openai",
+      "base_url": "https://api.openai.com/v1",
+      "api_method": "auto",
+      "api_key_env": "OPENAI_API_KEY",
+      "api_key": "",
+      "models": {
+        "synthesis": "gpt-4o-mini"
+      }
+    },
+    "openai_compatible_gateway": {
+      "provider": "openai",
+      "base_url": "https://your-openai-compatible-gateway.example.com/v1",
+      "api_method": "chat.completions",
+      "api_key_env": "GATEWAY_API_KEY",
+      "api_key": "",
+      "models": {
+        "synthesis": "gpt-4o-mini"
+      }
+    },
+    "local_openai_compatible": {
+      "provider": "openai",
+      "base_url": "http://127.0.0.1:8000/v1",
+      "api_method": "chat.completions",
+      "api_key_env": "LOCAL_LLM_API_KEY",
+      "api_key": "EMPTY",
+      "models": {
+        "synthesis": "your-local-model-id"
+      }
+    }
+  }
+}
