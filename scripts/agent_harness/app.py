@@ -7,9 +7,24 @@ import time
 from pathlib import Path
 from typing import Any
 
-import gradio as gr
-
 ROOT = Path(__file__).resolve().parents[2]
+
+import gradio as gr
+import matplotlib
+
+os.environ.setdefault("MPLCONFIGDIR", str(ROOT / ".matplotlib_cache"))
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+plt.rcParams["font.sans-serif"] = [
+    "Microsoft YaHei",
+    "SimHei",
+    "Noto Sans CJK SC",
+    "Arial Unicode MS",
+    "DejaVu Sans",
+]
+plt.rcParams["axes.unicode_minus"] = False
+
 SCRIPTS_DIR = ROOT / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
@@ -63,9 +78,19 @@ def run_ui(
     agents_md = agent_results_markdown(run_data)
     final_report = run_data["final_report"]
     metrics_json = json.dumps(slim_run_data(run_data), ensure_ascii=False, indent=2)
+    dashboard_html = build_dashboard_html(run_data)
+    segment_rows = build_segment_rows(run_data)
+    delta_chart = build_delta_chart(run_data, output_dir)
+    gallery = build_gallery_items(artifacts, delta_chart)
     files = [path for path in artifacts.values() if Path(path).exists()]
+    if delta_chart and Path(delta_chart).exists():
+        files.append(delta_chart)
 
     return (
+        dashboard_html,
+        delta_chart,
+        segment_rows,
+        gallery,
         timeline_md,
         final_report,
         agents_md,
@@ -93,6 +118,113 @@ def build_timeline(run_data: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def build_dashboard_html(run_data: dict[str, Any]) -> str:
+    analysis = run_data.get("agents", [{}])[0].get("evidence", {})
+    options = run_data.get("options", {})
+    llm = options.get("llm", {})
+    alignment = analysis.get("alignment", {})
+    cards = [
+        (
+            "整体时长差",
+            f"{analysis.get('duration_delta_sec', 0):+.2f}s",
+            "学生 - 专家，接近 0 表示整体长度相近",
+        ),
+        (
+            "Tempo 差异",
+            f"{analysis.get('tempo_delta_bpm', 0):+.2f} BPM",
+            "当前是全局估计，局部 rubato 需看曲线",
+        ),
+        (
+            "动态对比差",
+            f"{analysis.get('dynamic_contrast_delta_db', 0):+.2f} dB",
+            "正值表示学生整体动态范围更大",
+        ),
+        (
+            "对齐相似度",
+            f"{alignment.get('mean_chroma_similarity', 0):.3f}",
+            f"质量：{analysis.get('alignment', {}).get('quality', options.get('alignment_quality', '见 JSON'))}",
+        ),
+        (
+            "LLM 状态",
+            "启用" if options.get("use_openai") else "未启用",
+            f"{llm.get('profile', 'n/a')} / {llm.get('model', 'n/a')}",
+        ),
+    ]
+    card_html = "".join(
+        f"""
+        <div class="metric-card">
+          <div class="metric-label">{label}</div>
+          <div class="metric-value">{value}</div>
+          <div class="metric-note">{note}</div>
+        </div>
+        """
+        for label, value, note in cards
+    )
+    return f"""
+    <div class="dashboard-wrap">
+      <div class="dashboard-title">演奏差异总览</div>
+      <div class="dashboard-subtitle">这些指标不是分数，而是帮助定位“值得回听的位置”和“可讨论的表达差异”。</div>
+      <div class="metric-grid">{card_html}</div>
+    </div>
+    """
+
+
+def build_segment_rows(run_data: dict[str, Any]) -> list[list[Any]]:
+    segments = run_data.get("analysis", {}).get("comparison", {}).get("lowest_similarity_segments", [])
+    rows = []
+    for item in segments:
+        rows.append(
+            [
+                int(item.get("segment", 0)),
+                f"{item.get('ref_time_start_sec', 0):.1f}-{item.get('ref_time_end_sec', 0):.1f}s",
+                round(float(item.get("mean_chroma_similarity", 0)), 3),
+                round(float(item.get("dynamic_delta_db_user_minus_expert", 0)), 2),
+                round(float(item.get("onset_strength_delta_user_minus_expert", 0)), 3),
+                "优先回听" if float(item.get("mean_chroma_similarity", 1)) < 0.86 else "可抽查",
+            ]
+        )
+    return rows
+
+
+def build_delta_chart(run_data: dict[str, Any], output_dir: Path) -> str:
+    comparison = run_data.get("analysis", {}).get("comparison", {})
+    values = {
+        "Rubato": comparison.get("rubato_proxy_delta_user_minus_expert", 0),
+        "动态范围": comparison.get("dynamic_contrast_delta_db_user_minus_expert", 0),
+        "呼吸空间": comparison.get("breathing_space_delta_user_minus_expert", 0),
+        "触键清晰": comparison.get("onset_clarity_delta_user_minus_expert", 0),
+        "音色亮度": comparison.get("brightness_delta_user_minus_expert", 0),
+    }
+    fig, ax = plt.subplots(figsize=(9, 3.8))
+    names = list(values.keys())
+    vals = [float(v or 0) for v in values.values()]
+    colors = ["#2f6f73" if value >= 0 else "#b65f2a" for value in vals]
+    ax.barh(names, vals, color=colors)
+    ax.axvline(0, color="#222222", linewidth=1)
+    ax.set_title("学生相对专家的表达特征差异", fontsize=14, pad=12)
+    ax.set_xlabel("学生 - 专家")
+    ax.grid(axis="x", alpha=0.22)
+    for idx, value in enumerate(vals):
+        ax.text(value, idx, f" {value:+.2f}", va="center", fontsize=10)
+    fig.tight_layout()
+    path = output_dir / "dashboard_expression_delta.png"
+    fig.savefig(path, dpi=160)
+    plt.close(fig)
+    return str(path)
+
+
+def build_gallery_items(artifacts: dict[str, str], delta_chart: str) -> list[str]:
+    ordered = [
+        delta_chart,
+        artifacts.get("05_expressive_radar.png", ""),
+        artifacts.get("01_waveform_rms.png", ""),
+        artifacts.get("02_tempo_curves.png", ""),
+        artifacts.get("03_dynamic_curves.png", ""),
+        artifacts.get("04_alignment_segments.png", ""),
+    ]
+    return [path for path in ordered if path and Path(path).exists()]
+
+
 def slim_run_data(run_data: dict[str, Any]) -> dict[str, Any]:
     return {
         "expert_audio": run_data.get("expert_audio"),
@@ -113,7 +245,32 @@ def slim_run_data(run_data: dict[str, Any]) -> dict[str, Any]:
 
 
 def build_demo() -> gr.Blocks:
-    with gr.Blocks(title="Expressive Piano Agent Harness") as demo:
+    css = """
+    .dashboard-wrap {
+      padding: 18px;
+      border-radius: 18px;
+      background: linear-gradient(135deg, #f4efe4 0%, #e9f0ec 55%, #f8f2e8 100%);
+      border: 1px solid #d7cab8;
+    }
+    .dashboard-title { font-size: 24px; font-weight: 800; color: #243832; }
+    .dashboard-subtitle { margin-top: 4px; color: #5e625a; }
+    .metric-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: 12px;
+      margin-top: 16px;
+    }
+    .metric-card {
+      padding: 14px;
+      border-radius: 14px;
+      background: rgba(255,255,255,0.72);
+      box-shadow: 0 8px 24px rgba(47, 65, 55, 0.08);
+    }
+    .metric-label { color: #667066; font-size: 13px; }
+    .metric-value { color: #1d302b; font-size: 26px; font-weight: 800; margin-top: 4px; }
+    .metric-note { color: #6f766e; font-size: 12px; margin-top: 6px; line-height: 1.35; }
+    """
+    with gr.Blocks(title="Expressive Piano Agent Harness", css=css) as demo:
         gr.Markdown(
             """
 # Expressive Piano Agent Harness
@@ -150,9 +307,20 @@ def build_demo() -> gr.Blocks:
                 run_btn = gr.Button("运行多智能体分析", variant="primary")
             with gr.Column(scale=2):
                 gr.Markdown("## 结果")
-                timeline = gr.Markdown(label="Agent 运行过程")
+                dashboard = gr.HTML()
+                with gr.Row():
+                    delta_chart_img = gr.Image(label="表达特征差异", type="filepath")
+                segment_table = gr.Dataframe(
+                    headers=["片段", "时间", "音高轮廓相似度", "动态差 dB", "起音差", "建议"],
+                    label="优先回听片段",
+                    interactive=False,
+                )
                 final_report = gr.Markdown(label="最终点评")
 
+        with gr.Tab("可视化画廊"):
+            gallery = gr.Gallery(label="分析图表", columns=2, height="auto", object_fit="contain")
+        with gr.Tab("Agent 过程"):
+            timeline = gr.Markdown(label="Agent 运行过程")
         with gr.Tab("Agent 细节"):
             agents_md = gr.Markdown()
         with gr.Tab("结构化 JSON"):
@@ -183,6 +351,10 @@ def build_demo() -> gr.Blocks:
                 model,
             ],
             outputs=[
+                dashboard,
+                delta_chart_img,
+                segment_table,
+                gallery,
                 timeline,
                 final_report,
                 agents_md,

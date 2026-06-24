@@ -120,6 +120,7 @@ def run_harness(
         "user_audio": str(user_path),
         "output_dir": str(output_dir),
         "analysis_dir": str(analysis_dir),
+        "analysis": analysis,
         "elapsed_sec": time.time() - start,
         "options": context.options,
         "agents": [result.__dict__ for result in agent_results],
